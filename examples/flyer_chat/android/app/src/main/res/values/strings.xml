@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">EchoAI</string>
+    <string name="accessibility_service_description">本应用需要无障碍服务权限以支持快捷功能，包括：截图、打开通知中心、锁屏等系统操作。此服务仅在您启用时运行，不会记录或上传任何内容，仅用于执行您主动触发的系统功能。</string>
+</resources>
+
