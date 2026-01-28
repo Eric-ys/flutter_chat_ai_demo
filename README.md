@@ -14,30 +14,14 @@
     - [为什么使用内部私有目录？](#为什么使用内部私有目录)
     - [部署步骤](#部署步骤)
     - [手动部署（可选）](#手动部署可选)
-- [使用说明](#使用说明)
-    - [基本使用](#基本使用)
-    - [API 使用](#api-使用)
-    - [Qwen2.5 对话助手](#qwen25-对话助手)
 - [技术细节](#技术细节)
-    - [模型配置](#模型配置)
-    - [JNI 实现](#jni-实现)
-    - [流式输出实现详解](#流式输出实现详解)
-    - [KV Cache 管理](#kv-cache-管理)
-    - [文件系统配置](#文件系统配置)
-    - [编译配置](#编译配置)
 - [故障排除](#故障排除)
     - [模型加载失败](#模型加载失败)
-    - [应用冻结](#应用冻结)
-    - [流式输出不显示](#流式输出不显示)
-    - [KV Cache 错误](#kv-cache-错误)
     - [权限问题](#权限问题)
     - [模型文件不存在](#模型文件不存在)
     - [libllama.so 加载失败](#libllamaso-加载失败)
-    - [流式输出不工作](#流式输出不工作)
-    - [JNI 回调失败](#jni-回调失败)
 - [项目结构](#项目结构)
 - [相关文档](#相关文档)
-- [技术深度解析](#技术深度解析)
 - [最佳实践](#最佳实践)
 - [已知限制](#已知限制)
 
@@ -172,7 +156,6 @@ cmake --build . -j$(nproc 2>/dev/null || sysctl -n hw.ncpu)
 
 编译成功后，在 `build-android-arm64/` 目录下会生成：
 - `libllama.so` ← **核心推理库（必须）**
-- `libcommon.so` ← 公共工具库（如 tokenizer）
 
 **步骤四：复制到项目**
 
@@ -325,104 +308,6 @@ adb shell "run-as flyer.chat.flyer_chat chmod 644 /data/data/flyer.chat.flyer_ch
 adb shell rm /sdcard/tmp_model.gguf
 ```
 
-## 📖 使用说明
-
-### 基本使用
-
-1. **启动应用**：应用启动时会自动检查模型文件并加载模型
-2. **发送消息**：在输入框中输入消息，点击发送按钮
-3. **查看回复**：AI 会实时流式输出回复，支持 Markdown 格式
-4. **停止生成**：在生成过程中，发送按钮会变为停止按钮，点击可停止生成
-
-### API 使用
-
-#### 加载模型
-
-```dart
-import 'package:flyer_chat/inference/llama_inference.dart';
-
-// 使用默认路径加载模型
-bool loaded = await LlamaInference.loadModel();
-
-// 或指定自定义路径
-bool loaded = await LlamaInference.loadModel(
-  modelPath: '/custom/path/to/model.gguf'
-);
-```
-
-#### 生成回复（同步）
-
-```dart
-String response = await LlamaInference.generate("你好！");
-print(response);
-```
-
-#### 流式生成回复
-
-```dart
-Stream<String> stream = LlamaInference.generateStream("你好！");
-
-stream.listen(
-  (token) {
-    print(token); // 逐个字符输出
-  },
-  onDone: () {
-    print("生成完成");
-  },
-  onError: (error) {
-    print("错误: $error");
-  },
-);
-```
-
-#### 停止生成
-
-```dart
-await LlamaInference.stopGeneration();
-```
-
-#### 卸载模型
-
-```dart
-await LlamaInference.unloadModel();
-```
-
-### Qwen2.5 对话助手
-
-使用 `QwenChatHelper` 可以自动处理对话历史和格式转换：
-
-```dart
-import 'package:flyer_chat/inference/qwen_chat_helper.dart';
-import 'package:flutter_chat_core/flutter_chat_core.dart';
-
-// 从聊天历史生成回复
-List<Message> messages = [...]; // 聊天历史
-String currentUserId = "user123";
-
-String response = await QwenChatHelper.generateResponse(
-  messages,
-  currentUserId,
-);
-
-// 流式生成回复
-StreamSubscription<String>? subscription = 
-  await QwenChatHelper.generateAndStreamResponse(
-    messages: messages,
-    currentUserId: currentUserId,
-    chatController: chatController,
-    streamManager: streamManager,
-    onStreamingStateChanged: (isStreaming, subscription) {
-      // 处理流式状态变化
-    },
-    onDone: () {
-      print("生成完成");
-    },
-    onError: (error) {
-      print("错误: $error");
-    },
-  );
-```
-
 ## 🔧 技术细节
 
 ### 模型配置
@@ -433,306 +318,37 @@ StreamSubscription<String>? subscription =
 - **采样策略**：Greedy sampling
 - **最大生成 tokens**：256
 
-### JNI 实现
+### 架构实现
 
-#### 核心函数
+本项目采用多层架构实现 Flutter 到原生 C++ 的集成：
 
-- `loadModel(String modelPath)`: 加载模型
-- `generate(String prompt)`: 同步生成
-- `generateStream(String prompt)`: 流式生成
-- `stopGeneration()`: 停止生成
-- `unloadModel()`: 卸载模型
+- **Flutter 层**：通过 MethodChannel 和 EventChannel 与原生层通信
+- **Kotlin 桥接层**：处理平台通道消息，管理 JNI 调用
+- **JNI C++ 层**：直接调用 llama.cpp API 进行模型推理
+- **流式输出**：C++ 层通过 JNI 回调逐 token 返回，Kotlin 层通过 EventChannel 推送到 Flutter，Dart 层使用 Stream 接收并实时更新 UI
 
-#### JNI 回调机制详解
+### 关键技术点
 
-本项目使用 JNI 全局引用和回调接口实现 C++ 后台线程到 Java/Kotlin 的跨线程通信：
-
-**1. 初始化回调（`initStreamCallback`）**
-
-```cpp
-// 在 C++ 层保存 Java 回调对象的全局引用
-Java_flyer_chat_flyer_1chat_LlamaInference_initStreamCallback(
-    JNIEnv *env, jclass clazz, jobject callback
-) {
-    // 1. 清理旧的全局引用（避免内存泄漏）
-    if (g_callback_obj) {
-        env->DeleteGlobalRef(g_callback_obj);
-    }
-    
-    // 2. 创建新的全局引用（跨线程使用）
-    g_callback_obj = env->NewGlobalRef(callback);
-    
-    // 3. 获取回调类的全局引用
-    jclass callback_class = env->GetObjectClass(callback);
-    g_callback_class = (jclass)env->NewGlobalRef(callback_class);
-    
-    // 4. 获取 onToken 方法的 ID
-    g_callback_method = env->GetMethodID(callback_class, "onToken", "(Ljava/lang/String;)V");
-    
-    // 5. 保存 JavaVM 指针（用于在后台线程获取 JNIEnv）
-    env->GetJavaVM(&g_jvm);
-}
-```
-
-**2. 发送 Token（`send_token_to_java`）**
-
-```cpp
-// 在 C++ 后台线程中调用 Java 回调方法
-void send_token_to_java(const char* token) {
-    // 1. 从 JavaVM 获取当前线程的 JNIEnv
-    JNIEnv* env;
-    int status = g_jvm->AttachCurrentThread(&env, nullptr);
-    
-    // 2. 将 C 字符串转换为 Java String
-    jstring jtoken = env->NewStringUTF(token);
-    
-    // 3. 调用 Java 回调方法
-    env->CallVoidMethod(g_callback_obj, g_callback_method, jtoken);
-    
-    // 4. 释放局部引用
-    env->DeleteLocalRef(jtoken);
-}
-```
-
-**3. Kotlin 层实现**
-
-```kotlin
-// 定义回调接口
-interface StreamCallback {
-    fun onToken(token: String)
-}
-
-// 在 MainActivity 中实现回调
-val callback = object : StreamCallback {
-    override fun onToken(token: String) {
-        // 在主线程中发送 token 到 EventChannel
-        runOnUiThread {
-            llamaEventSink?.success(token)
-        }
-    }
-}
-
-// 初始化回调
-LlamaInference.initStreamCallback(callback)
-```
-
-**关键点**：
-- **全局引用**：`jobject` 局部引用在函数返回后失效，必须使用 `NewGlobalRef` 创建全局引用
-- **线程安全**：C++ 后台线程需要 `AttachCurrentThread` 获取 `JNIEnv`
-- **主线程调用**：`EventChannel` 的 `success()` 必须在主线程调用，使用 `runOnUiThread`
-
-### 流式输出实现详解
-
-流式输出的完整数据流：
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│ 1. C++ 层（llama_jni.cpp）                                   │
-│    - 在生成循环中，每生成一个 token                          │
-│    - 调用 send_token_to_java(token)                         │
-└──────────────────────┬──────────────────────────────────────┘
-                       │ JNI CallVoidMethod
-┌──────────────────────▼──────────────────────────────────────┐
-│ 2. Kotlin 层（MainActivity.kt）                              │
-│    - StreamCallback.onToken(token) 被调用                   │
-│    - runOnUiThread { llamaEventSink?.success(token) }       │
-└──────────────────────┬──────────────────────────────────────┘
-                       │ EventChannel
-┌──────────────────────▼──────────────────────────────────────┐
-│ 3. Dart 层（llama_inference.dart）                           │
-│    - EventChannel.receiveBroadcastStream()                   │
-│    - stream.listen((token) { ... })                         │
-└──────────────────────┬──────────────────────────────────────┘
-                       │ StreamSubscription
-┌──────────────────────▼──────────────────────────────────────┐
-│ 4. 业务层（qwen_chat_helper.dart）                           │
-│    - 累积 token: accumulatedText += token                    │
-│    - 实时过滤: _checkAndRemoveEndMarker()                    │
-│    - 更新状态: streamManager.updateStreamText()              │
-└──────────────────────┬──────────────────────────────────────┘
-                       │ notifyListeners()
-┌──────────────────────▼──────────────────────────────────────┐
-│ 5. UI 层（local.dart）                                       │
-│    - AnimatedBuilder(animation: _streamManager)             │
-│    - NativeChatTextStreamMessage 重建                        │
-│    - GptMarkdown 渲染富文本                                  │
-└─────────────────────────────────────────────────────────────┘
-```
-
-**关键组件**：
-
-1. **SimpleStreamManager**：管理流式状态
-    - `updateStreamText()`: 更新累积文本
-    - `notifyListeners()`: 触发 UI 重建
-    - `completeStream()`: 完成流式输出，转换为普通消息
-
-2. **AnimatedBuilder**：监听状态变化
-   ```dart
-   AnimatedBuilder(
-     animation: _streamManager,
-     builder: (context, _) {
-       final streamState = _streamManager.getState(message.streamId);
-       return NativeChatTextStreamMessage(streamState: streamState);
-     },
-   )
-   ```
-
-3. **实时过滤**：在流式输出过程中检测并移除：
-    - `<|im_end|>` 标记（完整或部分形式）
-    - 系统提示词回显
-    - 其他不需要的内容
-
-### KV Cache 管理
-
-每次生成前会清空 KV Cache，确保对话上下文的一致性：
-
-```cpp
-// 清空序列 0 的 KV Cache
-llama_memory_seq_rm(llama_get_memory(g_ctx), 0, -1, -1);
-```
-
-### 文件系统配置
-
-在 `llama_jni.cpp` 中配置模型加载参数：
-
-```cpp
-struct llama_model_params model_params = llama_model_default_params();
-model_params.use_mmap = true;        // 启用内存映射（Android 内部目录支持）
-model_params.use_direct_io = false;   // 禁用 Direct I/O（避免 FUSE 文件系统错误）
-model_params.use_mlock = false;       // 禁用内存锁定（Android 上通常不需要）
-model_params.no_alloc = false;        // 允许自动分配内存
-```
-
-**为什么使用内部私有目录？**
-
-- **FUSE 文件系统限制**：`/sdcard` 是 FUSE 文件系统，不支持 Direct I/O，会导致 `read error: Invalid argument`
-- **性能优势**：内部目录位于真实文件系统，支持内存映射，性能更好
-- **权限优势**：无需存储权限，文件不会被系统自动清理
-- **安全性**：应用私有目录，其他应用无法访问
-
-### 编译配置
-
-#### Gradle 配置（`android/app/build.gradle.kts`）
-
-```kotlin
-android {
-    defaultConfig {
-        // 配置 NDK ABI 过滤器
-        ndk {
-            abiFilters.clear()
-            abiFilters += listOf("arm64-v8a")  // 当前仅支持 arm64-v8a
-        }
-        
-        // 配置 CMake
-        externalNativeBuild {
-            cmake {
-                cppFlags += listOf("-std=c++17")
-                arguments += "-DANDROID_STL=c++_shared"
-                abiFilters.clear()
-                abiFilters.add("arm64-v8a")
-            }
-        }
-    }
-    
-    // 配置外部原生构建
-    externalNativeBuild {
-        cmake {
-            path = file("CMakeLists.txt")
-            version = "3.22.1"
-        }
-    }
-    
-    // 指定 jniLibs 目录
-    sourceSets {
-        named("main") {
-            jniLibs.srcDir("src/main/jniLibs")
-        }
-    }
-}
-```
-
-#### CMake 配置（`android/app/src/main/cpp/CMakeLists.txt`）
-
-```cmake
-# 设置 C++ 标准
-set(CMAKE_CXX_STANDARD 17)
-
-# 创建 llama_jni 共享库
-add_library(llama_jni SHARED llama_jni.cpp)
-
-# 包含头文件目录
-target_include_directories(llama_jni PRIVATE
-    ${LLAMA_INCLUDE_DIR}
-)
-
-# 链接系统库
-find_library(log-lib log)
-find_library(android-lib android)
-
-# 链接预编译的 libllama.so
-target_link_libraries(llama_jni
-    ${log-lib}
-    ${android-lib}
-    "${LLAMA_LIB_PATH}"  # 指向 jniLibs/arm64-v8a/libllama.so
-)
-```
-
-**编译顺序**：
-1. 首先编译 `libllama.so`（如果从源码编译）
-2. 将 `libllama.so` 放置到 `jniLibs/arm64-v8a/`
-3. 编译 `llama_jni.so`（JNI 桥接库）
-4. Flutter 构建系统会自动打包所有 `.so` 文件到 APK
+- **JNI 跨线程通信**：使用全局引用和 `AttachCurrentThread` 实现 C++ 后台线程到 Java/Kotlin 的回调
+- **流式状态管理**：通过 `ChangeNotifier` 和 `AnimatedBuilder` 实现响应式 UI 更新
+- **KV Cache 管理**：每次生成前清空 KV Cache，确保对话上下文一致性
+- **文件系统优化**：模型文件存储在应用内部私有目录，支持 Direct I/O 和内存映射
+- **异步处理**：所有耗时操作（模型加载、推理、文件 I/O）都在后台线程执行
 
 ## 🐛 故障排除
 
 ### 模型加载失败
 
-**错误信息**：
-```
-E/LlamaJNI: read error: Invalid argument
-E/LlamaJNI: llama_model_load: error loading model
-```
+**错误信息**：`E/LlamaJNI: read error: Invalid argument`
 
 **解决方案**：
 1. 确保模型文件在内部私有目录（不是 `/sdcard`）
 2. 检查文件权限（应该是 644）
 3. 验证文件完整性（文件大小是否正确）
 
-### 应用冻结
-
-**症状**：发送消息后应用无响应
-
-**解决方案**：
-- 确保流式生成在后台线程执行
-- 检查 `runOnUiThread` 是否正确使用
-- 查看日志确认是否有死锁
-
-### 流式输出不显示
-
-**症状**：AI 回复不显示或显示不完整
-
-**解决方案**：
-1. 检查 `EventChannel` 是否正确注册
-2. 确认 `SimpleStreamManager` 是否正确初始化
-3. 查看日志确认 token 是否正常接收
-
-### KV Cache 错误
-
-**错误信息**：
-```
-E/LlamaJNI: init: the tokens of sequence 0 in the input batch have inconsistent sequence positions
-```
-
-**解决方案**：
-- 确保每次生成前清空 KV Cache
-- 检查 token 位置计算是否正确
-
 ### 权限问题
 
-**错误信息**：
-```
-run-as: exec failed for test: Permission denied
-```
+**错误信息**：`run-as: exec failed for test: Permission denied`
 
 **解决方案**：
 1. 确保应用是 debug 版本
@@ -741,10 +357,7 @@ run-as: exec failed for test: Permission denied
 
 ### 模型文件不存在
 
-**错误信息**：
-```
-模型文件不存在: /data/user/0/flyer.chat.flyer_chat/app_flutter/models/qwen2_5_3b.Q4_K_M.gguf
-```
+**错误信息**：模型文件路径不存在
 
 **解决方案**：
 1. 运行部署脚本：`./scripts/deploy_model_to_internal.sh`
@@ -753,43 +366,13 @@ run-as: exec failed for test: Permission denied
 
 ### libllama.so 加载失败
 
-**错误信息**：
-```
-java.lang.UnsatisfiedLinkError: dlopen failed: library "libllama.so" not found
-```
+**错误信息**：`java.lang.UnsatisfiedLinkError: dlopen failed: library "libllama.so" not found`
 
 **解决方案**：
 1. 检查 `libllama.so` 是否存在于 `android/app/src/main/jniLibs/arm64-v8a/`
 2. 验证库文件架构：`file android/app/src/main/jniLibs/arm64-v8a/libllama.so`（应该是 `arm64-v8a`）
 3. 检查 `build.gradle.kts` 中的 `abiFilters` 是否包含 `arm64-v8a`
 4. 清理并重新构建：`flutter clean && flutter build apk`
-
-### 流式输出不工作
-
-**症状**：AI 回复不显示或显示不完整
-
-**解决方案**：
-1. 检查 `EventChannel` 是否正确注册（查看 `MainActivity.kt`）
-2. 确认 `SimpleStreamManager` 是否正确初始化并添加到 `Provider`
-3. 查看日志确认 token 是否正常接收：
-   ```bash
-   adb logcat | grep -E "LlamaJNI|EventChannel"
-   ```
-4. 检查 `textStreamMessageBuilder` 是否正确配置
-5. 确认 `AnimatedBuilder` 是否正确监听 `_streamManager`
-
-### JNI 回调失败
-
-**错误信息**：
-```
-JNI DETECTED ERROR IN APPLICATION: JNI NewStringUTF called with pending exception
-```
-
-**解决方案**：
-1. 确保 `send_token_to_java()` 中正确使用 `AttachCurrentThread`
-2. 确保 `EventChannel.success()` 在主线程调用（使用 `runOnUiThread`）
-3. 检查全局引用是否正确创建和清理
-4. 查看完整日志定位具体错误位置
 
 ## 📁 项目结构
 
@@ -828,57 +411,6 @@ examples/flyer_chat/
 - [Qwen 使用示例](lib/inference/QWEN_USAGE_EXAMPLE.md) - Qwen2.5 集成示例代码
 - [Llama 使用指南](LLAMA_USAGE.md) - Llama 推理 API 使用指南
 
-## 🔬 技术深度解析
-
-### 为什么需要全局引用？
-
-JNI 中的 `jobject` 是局部引用，只在当前 `JNIEnv` 和函数调用期间有效。在 C++ 后台线程中调用 Java 方法时：
-
-1. **局部引用失效**：函数返回后，局部引用会被自动释放
-2. **跨线程使用**：C++ 后台线程需要访问 Java 对象
-3. **全局引用持久化**：使用 `NewGlobalRef` 创建的全局引用可以跨线程、跨函数使用
-
-### 流式输出的性能优化
-
-1. **异步处理**：生成过程在后台线程执行，不阻塞 UI
-2. **批量更新**：使用 `notifyListeners()` 批量触发 UI 更新
-3. **节流滚动**：流式输出时使用节流机制（200ms）控制滚动频率
-4. **内存管理**：及时释放不需要的 token 和字符串
-
-### KV Cache 管理
-
-每次生成前清空 KV Cache，确保对话上下文的一致性：
-
-```cpp
-// 清空序列 0 的 KV Cache（从位置 -1 到 -1，即全部清空）
-llama_memory_seq_rm(llama_get_memory(g_ctx), 0, -1, -1);
-```
-
-**为什么需要清空？**
-- 避免前一次对话的上下文影响当前生成
-- 确保 token 位置计算的一致性
-- 防止 "inconsistent sequence positions" 错误
-
-### 停止生成机制
-
-1. **C++ 层**：使用全局标志 `g_should_stop`
-   ```cpp
-   static volatile bool g_should_stop = false;
-   ```
-
-2. **生成循环检查**：
-   ```cpp
-   while (n_cur < max_tokens && !g_should_stop) {
-       // 生成 token...
-   }
-   ```
-
-3. **Dart 层取消订阅**：
-   ```dart
-   subscription?.cancel();  // 取消 Stream 订阅
-   await LlamaInference.stopGeneration();  // 设置停止标志
-   ```
-
 ## 🎯 最佳实践
 
 1. **模型加载时机**：在应用启动时或首次使用前加载，避免用户等待
@@ -900,14 +432,6 @@ llama_memory_seq_rm(llama_get_memory(g_ctx), 0, -1, -1);
 - [llama.cpp 官方文档](https://github.com/ggerganov/llama.cpp)
 - [Qwen2.5 模型](https://huggingface.co/Qwen/Qwen2.5-3B-Instruct)
 - [Flutter 平台通道文档](https://docs.flutter.dev/development/platform-integration/platform-channels)
-
-## 📝 许可证
-
-本项目遵循项目根目录的许可证。
-
-## 🤝 贡献
-
-欢迎提交 Issue 和 Pull Request！
 
 ---
 
