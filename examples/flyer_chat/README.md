@@ -1,6 +1,7 @@
 # Flyer Chat - 本地大语言模型集成
 
 一个基于 Flutter 的聊天应用，集成了本地大语言模型（LLM）推理能力，支持在 Android 设备上离线运行 Qwen2.5-3B 模型。
+基于 https://github.com/flyerhq/flutter_chat_ui 实现，该项目仅作为个人学习demo使用
 
 ## 📋 目录
 
@@ -171,7 +172,6 @@ cmake --build . -j$(nproc 2>/dev/null || sysctl -n hw.ncpu)
 
 编译成功后，在 `build-android-arm64/` 目录下会生成：
 - `libllama.so` ← **核心推理库（必须）**
-- `libcommon.so` ← 公共工具库（如 tokenizer）
 
 **步骤四：复制到项目**
 
@@ -697,35 +697,6 @@ E/LlamaJNI: llama_model_load: error loading model
 2. 检查文件权限（应该是 644）
 3. 验证文件完整性（文件大小是否正确）
 
-### 应用冻结
-
-**症状**：发送消息后应用无响应
-
-**解决方案**：
-- 确保流式生成在后台线程执行
-- 检查 `runOnUiThread` 是否正确使用
-- 查看日志确认是否有死锁
-
-### 流式输出不显示
-
-**症状**：AI 回复不显示或显示不完整
-
-**解决方案**：
-1. 检查 `EventChannel` 是否正确注册
-2. 确认 `SimpleStreamManager` 是否正确初始化
-3. 查看日志确认 token 是否正常接收
-
-### KV Cache 错误
-
-**错误信息**：
-```
-E/LlamaJNI: init: the tokens of sequence 0 in the input batch have inconsistent sequence positions
-```
-
-**解决方案**：
-- 确保每次生成前清空 KV Cache
-- 检查 token 位置计算是否正确
-
 ### 权限问题
 
 **错误信息**：
@@ -762,33 +733,6 @@ java.lang.UnsatisfiedLinkError: dlopen failed: library "libllama.so" not found
 2. 验证库文件架构：`file android/app/src/main/jniLibs/arm64-v8a/libllama.so`（应该是 `arm64-v8a`）
 3. 检查 `build.gradle.kts` 中的 `abiFilters` 是否包含 `arm64-v8a`
 4. 清理并重新构建：`flutter clean && flutter build apk`
-
-### 流式输出不工作
-
-**症状**：AI 回复不显示或显示不完整
-
-**解决方案**：
-1. 检查 `EventChannel` 是否正确注册（查看 `MainActivity.kt`）
-2. 确认 `SimpleStreamManager` 是否正确初始化并添加到 `Provider`
-3. 查看日志确认 token 是否正常接收：
-   ```bash
-   adb logcat | grep -E "LlamaJNI|EventChannel"
-   ```
-4. 检查 `textStreamMessageBuilder` 是否正确配置
-5. 确认 `AnimatedBuilder` 是否正确监听 `_streamManager`
-
-### JNI 回调失败
-
-**错误信息**：
-```
-JNI DETECTED ERROR IN APPLICATION: JNI NewStringUTF called with pending exception
-```
-
-**解决方案**：
-1. 确保 `send_token_to_java()` 中正确使用 `AttachCurrentThread`
-2. 确保 `EventChannel.success()` 在主线程调用（使用 `runOnUiThread`）
-3. 检查全局引用是否正确创建和清理
-4. 查看完整日志定位具体错误位置
 
 ## 📁 项目结构
 
@@ -899,14 +843,6 @@ llama_memory_seq_rm(llama_get_memory(g_ctx), 0, -1, -1);
 - [llama.cpp 官方文档](https://github.com/ggerganov/llama.cpp)
 - [Qwen2.5 模型](https://huggingface.co/Qwen/Qwen2.5-3B-Instruct)
 - [Flutter 平台通道文档](https://docs.flutter.dev/development/platform-integration/platform-channels)
-
-## 📝 许可证
-
-本项目遵循项目根目录的许可证。
-
-## 🤝 贡献
-
-欢迎提交 Issue 和 Pull Request！
 
 ---
 
