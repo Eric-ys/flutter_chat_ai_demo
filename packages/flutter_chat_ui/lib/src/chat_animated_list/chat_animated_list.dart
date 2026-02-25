@@ -121,6 +121,11 @@ class ChatAnimatedList extends StatefulWidget {
   /// Physics for the scroll view.
   final ScrollPhysics? physics;
 
+  /// The cache extent for the scroll view.
+  /// Controls how much off-screen content is cached for smoother scrolling.
+  /// Defaults to 1000.0 if not specified.
+  final double? cacheExtent;
+
   /// Creates an animated chat list.
   const ChatAnimatedList({
     super.key,
@@ -145,6 +150,7 @@ class ChatAnimatedList extends StatefulWidget {
     this.shouldScrollToEndWhenAtBottom = true,
     this.onEndReached,
     this.onStartReached,
+    this.cacheExtent,
     // Threshold for triggering pagination, represented as a value between 0 (top)
     // and 1 (bottom).
     //
@@ -219,23 +225,34 @@ class _ChatAnimatedListState extends State<ChatAnimatedList>
   // This flag prevents infinite pagination loops when reaching the start of available messages.
   bool _startPaginationShouldTrigger = false;
 
+  // 优化：标记是否已经完成初始延迟加载
+  bool _initialLazyLoadCompleted = false;
+  // 优化：初始只渲染的消息数量（进一步减少构建时间）
+  static const int _initialRenderCount = 15;
+
   @override
   void initState() {
     super.initState();
     debugPrint('🏗️ ChatAnimatedList.initState 开始');
     final initStartTime = DateTime.now();
-    
+
     _chatController = context.read<ChatController>();
     _scrollController = widget.scrollController ?? ScrollController();
     _observerController = SliverObserverController(
       controller: _scrollController,
     )..cacheJumpIndexOffset = false;
 
+    // 优化：同步加载消息列表（operationsStream 需要完整的消息列表）
+    // 但通过限制 initialItemCount 来减少初始构建的 widget 数量
     final messagesLoadStartTime = DateTime.now();
     _oldList = List.from(_chatController.messages);
-    final messagesLoadDuration = DateTime.now().difference(messagesLoadStartTime);
-    debugPrint('📦 ChatAnimatedList: 加载 ${_oldList.length} 条消息，耗时: ${messagesLoadDuration.inMilliseconds}ms');
-    
+    final messagesLoadDuration = DateTime.now().difference(
+      messagesLoadStartTime,
+    );
+    debugPrint(
+      '📦 ChatAnimatedList: 加载 ${_oldList.length} 条消息，耗时: ${messagesLoadDuration.inMilliseconds}ms',
+    );
+
     _oldListEmptyNotifier = ValueNotifier(_oldList.isEmpty);
     _operationsSubscription = _chatController.operationsStream.listen((event) {
       _operationsQueue.add(event);
@@ -265,22 +282,37 @@ class _ChatAnimatedListState extends State<ChatAnimatedList>
     } else {
       // Logic for non-reversed lists
       if (widget.initialScrollToEndMode == InitialScrollToEndMode.animate) {
-        debugPrint('🎬 ChatAnimatedList: initialScrollToEndMode=animate，将动画滚动到底部');
+        debugPrint(
+          '🎬 ChatAnimatedList: initialScrollToEndMode=animate，将动画滚动到底部',
+        );
         _handleScrollToBottom();
         // If we animate to bottom, no further jump adjustment is needed.
         _needsInitialScrollPositionAdjustment = false;
       } else if (widget.initialScrollToEndMode == InitialScrollToEndMode.jump) {
         // For .jump, we need adjustment. For .none, we don't.
         _needsInitialScrollPositionAdjustment = true;
-        debugPrint('🚀 ChatAnimatedList: initialScrollToEndMode=jump，将在第一帧后跳转到底部');
+        debugPrint(
+          '🚀 ChatAnimatedList: initialScrollToEndMode=jump，将在第一帧后跳转到底部',
+        );
       } else {
         _needsInitialScrollPositionAdjustment = false;
-        debugPrint('⏭️ ChatAnimatedList: initialScrollToEndMode=none，不进行初始滚动调整');
+        debugPrint(
+          '⏭️ ChatAnimatedList: initialScrollToEndMode=none，不进行初始滚动调整',
+        );
       }
     }
-    
+
     final initDuration = DateTime.now().difference(initStartTime);
-    debugPrint('✅ ChatAnimatedList.initState 完成，总耗时: ${initDuration.inMilliseconds}ms');
+    debugPrint(
+      '✅ ChatAnimatedList.initState 完成，总耗时: ${initDuration.inMilliseconds}ms',
+    );
+
+    // 优化：如果消息数量超过初始渲染数量，在第一帧后延迟加载剩余消息
+    if (_oldList.length > _initialRenderCount) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _lazyLoadRemainingMessages();
+      });
+    }
 
     // If controller supports ScrollToMessageMixin, attach the scroll methods
     if (_chatController is ScrollToMessageMixin) {
@@ -379,14 +411,30 @@ class _ChatAnimatedListState extends State<ChatAnimatedList>
 
     // Define the SliverAnimatedList once as it's used for both
     // reversed and non-reversed lists.
+    // 优化：限制初始 itemCount，只渲染可见区域的消息（提升初始构建速度）
+    // 对于大量消息，先只渲染最近的消息，其他消息通过延迟加载
+    // 进一步优化：将初始渲染数量降到 15，大幅减少初始构建时间
+    // 剩余消息会在第一帧后通过 _lazyLoadRemainingMessages 加载
+    final initialItemCount =
+        _oldList.isEmpty
+            ? 0
+            : _oldList.length > _initialRenderCount
+            ? _initialRenderCount // 如果消息超过 15 条，先只渲染最近 15 条
+            : _oldList.length;
+
     final sliverAnimatedList = SliverAnimatedList(
       key: _listKey,
-      initialItemCount: _oldList.length,
+      initialItemCount: initialItemCount,
       itemBuilder: (
         BuildContext context,
         int index,
         Animation<double> animation,
       ) {
+        // 优化：如果消息列表还未加载完成，返回占位符
+        if (_oldList.isEmpty || index >= _oldList.length) {
+          return const SizedBox.shrink();
+        }
+
         final message = _oldList[visualPosition(index)];
 
         return widget.itemBuilder(
@@ -491,7 +539,9 @@ class _ChatAnimatedListState extends State<ChatAnimatedList>
                 controller: _scrollController,
                 reverse: widget.reversed,
                 physics: widget.physics,
-                cacheExtent: 1000.0, // Cache 1000px of off-screen content for smoother scrolling
+                cacheExtent:
+                    widget.cacheExtent ??
+                    1000.0, // Cache off-screen content for smoother scrolling
                 keyboardDismissBehavior:
                     widget.keyboardDismissBehavior ??
                     ScrollViewKeyboardDismissBehavior.manual,
@@ -514,7 +564,8 @@ class _ChatAnimatedListState extends State<ChatAnimatedList>
                   return RepaintBoundary(
                     child: ExcludeSemantics(
                       child: Center(
-                        child: builders.emptyChatListBuilder?.call(context) ??
+                        child:
+                            builders.emptyChatListBuilder?.call(context) ??
                             const EmptyChatList(),
                       ),
                     ),
@@ -725,7 +776,9 @@ class _ChatAnimatedListState extends State<ChatAnimatedList>
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!_scrollController.hasClients || !mounted) {
-        debugPrint('⏭️ _adjustInitialScrollPosition: 跳过 - hasClients=${_scrollController.hasClients}, mounted=$mounted');
+        debugPrint(
+          '⏭️ _adjustInitialScrollPosition: 跳过 - hasClients=${_scrollController.hasClients}, mounted=$mounted',
+        );
         return;
       }
 
@@ -740,29 +793,37 @@ class _ChatAnimatedListState extends State<ChatAnimatedList>
         final position = _scrollController.position;
         final maxExtent = position.maxScrollExtent;
         final currentOffset = _scrollController.offset;
-        
+
         // Flutter might return a bunch of 0 values for maxScrollExtent,
         // we need to ignore those.
         if (maxExtent == 0) {
-          debugPrint('⏭️ _adjustInitialScrollPosition: 跳过 - maxScrollExtent 为 0');
+          debugPrint(
+            '⏭️ _adjustInitialScrollPosition: 跳过 - maxScrollExtent 为 0',
+          );
           return;
         }
 
         final targetPosition = _chatEndScrollPosition;
-        debugPrint('📍 _adjustInitialScrollPosition: 当前 offset=$currentOffset, maxExtent=$maxExtent, 目标位置=$targetPosition');
-        
+        debugPrint(
+          '📍 _adjustInitialScrollPosition: 当前 offset=$currentOffset, maxExtent=$maxExtent, 目标位置=$targetPosition',
+        );
+
         // jump until pixels == maxScrollExtent, i.e. end of the list
         // 使用阈值判断，因为浮点数比较可能有误差
         final offsetDiff = (currentOffset - targetPosition).abs();
         if (offsetDiff < 1.0) {
-          debugPrint('✅ _adjustInitialScrollPosition: 已在目标位置 (差值: ${offsetDiff.toStringAsFixed(2)}px)');
+          debugPrint(
+            '✅ _adjustInitialScrollPosition: 已在目标位置 (差值: ${offsetDiff.toStringAsFixed(2)}px)',
+          );
           _needsInitialScrollPositionAdjustment = false;
         } else {
           final adjustStartTime = DateTime.now();
           _scrollController.jumpTo(targetPosition);
           final adjustDuration = DateTime.now().difference(adjustStartTime);
-          debugPrint('🚀 _adjustInitialScrollPosition: 已跳转到底部，耗时: ${adjustDuration.inMicroseconds}μs');
-          
+          debugPrint(
+            '🚀 _adjustInitialScrollPosition: 已跳转到底部，耗时: ${adjustDuration.inMicroseconds}μs',
+          );
+
           // 延迟再次检查，因为列表可能还在渲染，maxExtent 可能会变化
           // 在列表内容稳定后再次调整滚动位置
           Future.delayed(const Duration(milliseconds: 100), () {
@@ -771,18 +832,22 @@ class _ChatAnimatedListState extends State<ChatAnimatedList>
             final newMaxExtent = newPosition.maxScrollExtent;
             final newOffset = newPosition.pixels;
             final newDistance = (newMaxExtent - newOffset).abs();
-            
+
             // 如果 maxExtent 变化了，说明列表还在渲染，再次跳转到底部
             if (newMaxExtent != maxExtent && newDistance > 10.0) {
-              debugPrint('🔄 _adjustInitialScrollPosition: 检测到列表高度变化 (${maxExtent.toStringAsFixed(2)} -> ${newMaxExtent.toStringAsFixed(2)})，重新跳转到底部');
+              debugPrint(
+                '🔄 _adjustInitialScrollPosition: 检测到列表高度变化 (${maxExtent.toStringAsFixed(2)} -> ${newMaxExtent.toStringAsFixed(2)})，重新跳转到底部',
+              );
               _scrollController.jumpTo(newMaxExtent);
             }
           });
-          
+
           _needsInitialScrollPositionAdjustment = false;
         }
       } else {
-        debugPrint('⏭️ _adjustInitialScrollPosition: 跳过 - _needsInitialScrollPositionAdjustment=false');
+        debugPrint(
+          '⏭️ _adjustInitialScrollPosition: 跳过 - _needsInitialScrollPositionAdjustment=false',
+        );
       }
     });
   }
@@ -1431,5 +1496,60 @@ class _ChatAnimatedListState extends State<ChatAnimatedList>
       }
     }
     _isProcessingOperations = false;
+  }
+
+  /// 优化：延迟加载剩余的消息（在第一帧后执行，避免阻塞初始构建）
+  void _lazyLoadRemainingMessages() {
+    if (_initialLazyLoadCompleted || !mounted) return;
+
+    final totalMessages = _oldList.length;
+    if (totalMessages <= _initialRenderCount) {
+      _initialLazyLoadCompleted = true;
+      return;
+    }
+
+    debugPrint(
+      '🚀 ChatAnimatedList: 开始延迟加载剩余 ${totalMessages - _initialRenderCount} 条消息',
+    );
+    final lazyLoadStartTime = DateTime.now();
+
+    // 注意：_oldList 已经包含了所有消息，initialItemCount 只创建了前 _initialRenderCount 个 widget
+    // 我们需要使用 insertAllItems 来添加剩余的 widget
+    // 对于 reversed 列表：
+    //   - 视觉上，最新的消息在底部（visual index 0），最旧的消息在顶部（visual index length-1）
+    //   - 但 _oldList 的顺序是：最旧的在 index 0，最新的在 index length-1
+    //   - 所以 visualPosition(0) = length-1（最新的），visualPosition(length-1) = 0（最旧的）
+    //   - 我们需要在 visualPosition(_initialRenderCount) 的位置插入剩余的消息
+    //     这个位置对应的是 _oldList[_initialRenderCount] 的视觉位置
+
+    final remainingCount = totalMessages - _initialRenderCount;
+
+    if (widget.reversed) {
+      // reversed 列表：在顶部（视觉上的更高 index）插入更旧的消息
+      // visualPosition(_initialRenderCount) 对应的是 _oldList[_initialRenderCount] 的视觉位置
+      // 这是剩余消息中"最旧"的一条，应该插入到视觉上的更高位置
+      final visualInsertIndex = visualPosition(_initialRenderCount);
+
+      _listKey.currentState?.insertAllItems(
+        visualInsertIndex,
+        remainingCount,
+        duration: Duration.zero, // 无动画，快速加载
+      );
+    } else {
+      // 非 reversed 列表：在底部插入剩余的消息
+      final visualInsertIndex = visualPosition(_initialRenderCount);
+
+      _listKey.currentState?.insertAllItems(
+        visualInsertIndex,
+        remainingCount,
+        duration: Duration.zero, // 无动画，快速加载
+      );
+    }
+
+    _initialLazyLoadCompleted = true;
+    final lazyLoadDuration = DateTime.now().difference(lazyLoadStartTime);
+    debugPrint(
+      '✅ ChatAnimatedList: 延迟加载完成，耗时: ${lazyLoadDuration.inMilliseconds}ms',
+    );
   }
 }

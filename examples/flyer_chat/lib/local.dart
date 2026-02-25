@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:math';
 
 import 'package:cross_cache/cross_cache.dart';
 import 'package:dio/dio.dart';
@@ -81,6 +80,7 @@ class LocalState extends State<Local> {
   TextStreamMessage? _currentVoiceStreamMessage; // 当前语音识别的流式消息
   bool _isStreamingAI = false; // AI 是否正在流式输出
   StreamSubscription<String>? _aiStreamSubscription; // AI 流式输出的订阅
+  bool _isLoadingOlderMessages = false; // 是否正在加载更旧的消息
 
   @override
   void initState() {
@@ -458,6 +458,71 @@ class LocalState extends State<Local> {
     debugPrint('✅ Local.dispose 清理完成');
   }
 
+  /// 动态计算 cacheExtent，根据消息数量优化内存占用
+  /// - 消息少时（<50）：使用较大缓存（1000px）提升滚动体验
+  /// - 消息中等（50-200）：使用中等缓存（500px）平衡性能和内存
+  /// - 消息多时（>200）：使用较小缓存（250px）减少内存占用
+  double _calculateCacheExtent() {
+    final messageCount = _chatController.messages.length;
+
+    if (messageCount < 50) {
+      return 1000.0;
+    } else if (messageCount < 200) {
+      return 500.0;
+    } else {
+      return 250.0;
+    }
+  }
+
+  /// 分页加载：加载更旧的消息（向上滚动时触发）
+  /// 在 reversed 模式下，onEndReached 会在滚动到顶部时触发
+  Future<void> _loadOlderMessages() async {
+    // 防止重复加载
+    if (_isLoadingOlderMessages) {
+      debugPrint('⏸️ 正在加载更旧的消息，跳过本次请求');
+      return;
+    }
+
+    final currentMessages = _chatController.messages;
+    if (currentMessages.isEmpty) {
+      debugPrint('📭 没有消息，无需加载');
+      return;
+    }
+
+    // 获取当前最旧的消息（在 reversed 模式下，第一条是最旧的）
+    final oldestMessage = currentMessages.first;
+
+    debugPrint('📥 开始加载更旧的消息，当前最旧消息 ID: ${oldestMessage.id}');
+    _isLoadingOlderMessages = true;
+
+    try {
+      // 从 HiveChatController 加载更旧的消息
+      final olderMessages = await (_chatController as HiveChatController)
+          .loadOlderMessages(
+            beforeMessageId: oldestMessage.id,
+            limit: 20, // 每次加载 20 条
+          );
+
+      if (olderMessages.isNotEmpty) {
+        debugPrint('✅ 成功加载 ${olderMessages.length} 条更旧的消息');
+
+        // 将更旧的消息插入到列表顶部（reversed 模式下，index 0 是最旧的位置）
+        await _chatController.insertAllMessages(
+          olderMessages,
+          index: 0,
+          animated: false, // 禁用动画，提升性能
+        );
+      } else {
+        debugPrint('📭 没有更旧的消息了');
+      }
+    } catch (e, stackTrace) {
+      debugPrint('❌ 加载更旧的消息失败: $e');
+      debugPrint('StackTrace: $stackTrace');
+    } finally {
+      _isLoadingOlderMessages = false;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -504,6 +569,10 @@ class LocalState extends State<Local> {
                   const BouncingScrollPhysics(), // 使用 BouncingScrollPhysics，提供流畅的惯性滚动
               bottomPadding:
                   130.0, // 底部间距，略大于 ComposerActionBar 的高度（约68px），确保最后一条消息不被遮挡
+              cacheExtent:
+                  _calculateCacheExtent(), // 动态计算 cacheExtent，根据消息数量优化内存占用
+              onEndReached: _loadOlderMessages, // 分页加载：滚动到顶部时加载更旧的消息
+              paginationThreshold: 0.1, // 距离顶部 10% 时触发加载
               insertAnimationDurationResolver: (message) {
                 // 禁用所有消息的插入动画，加快初始加载速度
                 // 这样进入聊天界面时可以直接定位到最新消息，不会看到滚动过程

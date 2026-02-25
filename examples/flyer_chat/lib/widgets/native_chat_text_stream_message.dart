@@ -46,8 +46,22 @@ class NativeChatTextStreamMessage extends StatefulWidget {
 class _NativeChatTextStreamMessageState
     extends State<NativeChatTextStreamMessage>
     with AutomaticKeepAliveClientMixin {
+  /// 条件性 KeepAlive 策略：
+  /// 1. 流式消息必须保持 alive（正在更新）
+  /// 2. 最近 50 条消息保持 alive（提升滚动体验）
+  /// 3. 其他消息允许回收（减少内存占用）
   @override
-  bool get wantKeepAlive => true;
+  bool get wantKeepAlive {
+    // 流式消息必须保持 alive
+    if (widget.streamState is StreamStateStreaming ||
+        widget.streamState is StreamStateLoading) {
+      return true;
+    }
+
+    // 只对最近 50 条消息保持 alive
+    // 在 reversed 模式下，index 越小越新（越靠近底部）
+    return widget.index < 50;
+  }
 
   @override
   void initState() {

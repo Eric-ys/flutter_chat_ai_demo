@@ -102,22 +102,35 @@ class CrossCache {
         onReceiveProgress: onReceiveProgress,
       );
     } else {
+      // 尝试作为本地文件路径处理
       try {
         final xfile = XFile(source);
+        // 优化：尝试读取文件，如果文件不存在会抛出异常
         final bytes = await xfile.readAsBytes();
+        if (bytes.isEmpty) {
+          throw Exception('File is empty: $source');
+        }
         await _cache.set(source, bytes);
         return bytes;
-        // ignore: empty_catches
-      } catch (e) {}
-
-      try {
-        final bytes = base64Decode(source);
-        await _cache.set(source, bytes);
-        return bytes;
-        // ignore: empty_catches
-      } catch (e) {}
-
-      throw Exception('Invalid source: cannot be processed');
+      } catch (e) {
+        // 如果文件读取失败（文件不存在或已损坏），继续尝试其他方式
+        // 如果文件读取失败，尝试作为 base64 字符串
+        try {
+          final bytes = base64Decode(source);
+          if (bytes.isEmpty) {
+            throw Exception('Base64 decode resulted in empty bytes');
+          }
+          await _cache.set(source, bytes);
+          return bytes;
+        } catch (e2) {
+          // 如果都失败了，抛出更详细的错误信息
+          throw Exception(
+            'Invalid source: cannot be processed. '
+            'Tried as file path (error: ${e.toString()}) and base64 (error: ${e2.toString()}). '
+            'Source: $source',
+          );
+        }
+      }
     }
   }
 

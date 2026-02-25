@@ -84,18 +84,38 @@ class CachedNetworkImage extends ImageProvider<NetworkImage>
     try {
       assert(key == this);
 
-      final bytes = await crossCache.downloadAndSave(
-        key.url,
-        headers: headers,
-        onReceiveProgress: (cumulative, total) {
-          chunkEvents.add(
-            ImageChunkEvent(
-              cumulativeBytesLoaded: cumulative,
-              expectedTotalBytes: total <= 0 ? null : total,
-            ),
+      Uint8List bytes;
+      try {
+        bytes = await crossCache.downloadAndSave(
+          key.url,
+          headers: headers,
+          onReceiveProgress: (cumulative, total) {
+            chunkEvents.add(
+              ImageChunkEvent(
+                cumulativeBytesLoaded: cumulative,
+                expectedTotalBytes: total <= 0 ? null : total,
+              ),
+            );
+          },
+        );
+      } catch (e) {
+        // 优化：如果下载失败，尝试从缓存中获取（可能是本地文件路径）
+        try {
+          final exists = await crossCache.contains(key.url);
+          if (exists) {
+            bytes = await crossCache.get(key.url);
+          } else {
+            rethrow; // 如果缓存中也没有，重新抛出原始异常
+          }
+        } catch (e2) {
+          // 如果缓存获取也失败，抛出更详细的错误
+          throw Exception(
+            'Failed to load image: ${key.url}. '
+            'Download error: ${e.toString()}. '
+            'Cache error: ${e2.toString()}',
           );
-        },
-      );
+        }
+      }
 
       if (bytes.lengthInBytes == 0) {
         throw Exception('CachedNetworkImage is an empty file: ${key.url}');
